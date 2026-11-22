@@ -1,0 +1,363 @@
+document.addEventListener('DOMContentLoaded', () => {
+  const lenis = initSmoothScroll();
+  initMobileNav();
+  initPortfolioColumns();
+  initPortfolioScrollCards();
+  initCookieBanner();
+  initRevealAnimations();
+  initParallax(lenis);
+});
+
+/**
+ * Scroll suave con inercia (Lenis cargado por CDN como script clásico, porque
+ * este sitio no tiene build step). Se omite si el usuario pide movimiento
+ * reducido, dejando el scroll nativo del navegador.
+ * @returns {object|null} instancia de Lenis, o null si no se activó
+ */
+function initSmoothScroll() {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return null;
+  if (typeof window.Lenis !== 'function') return null;
+
+  const lenis = new window.Lenis({
+    duration: 1.1,
+    easing: (t) => Math.min(1, 1.001 - Math.pow(2, -10 * t)),
+    smoothWheel: true,
+    autoRaf: true,
+    // En táctil se mantiene el scroll nativo: es más fluido y no rompe gestos.
+    syncTouch: false,
+    touchMultiplier: 1.6,
+  });
+
+  return lenis;
+}
+
+/**
+ * Animaciones de entrada al hacer scroll (fade + slide) con
+ * IntersectionObserver nativo, sin dependencias.
+ *
+ * Marcado en el HTML:
+ *   data-reveal="up|left|right|fade"  → dirección de la entrada (default: up)
+ *   data-reveal-delay="0.15"          → retardo en segundos
+ *   data-reveal-group="up"            → anima a los [data-reveal] hijos en cascada
+ */
+function initRevealAnimations() {
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const singles = Array.from(document.querySelectorAll('[data-reveal]:not([data-reveal-group] [data-reveal])'));
+  const groups = Array.from(document.querySelectorAll('[data-reveal-group]'));
+
+  if (prefersReducedMotion) {
+    singles.forEach((el) => el.classList.add('is-revealed'));
+    groups.forEach((group) => {
+      group.classList.add('is-revealed');
+      group.querySelectorAll('[data-reveal]').forEach((child) => child.classList.add('is-revealed'));
+    });
+    return;
+  }
+
+  singles.forEach((el) => {
+    el.classList.add('reveal', `reveal-${el.dataset.reveal || 'up'}`);
+    const delay = parseFloat(el.dataset.revealDelay || '0');
+    if (delay) el.style.transitionDelay = `${delay}s`;
+  });
+
+  groups.forEach((group) => {
+    const direction = group.dataset.revealGroup || 'up';
+    const children = Array.from(group.querySelectorAll('[data-reveal]'));
+    children.forEach((child, i) => {
+      child.classList.add('reveal', `reveal-${direction}`);
+      child.style.transitionDelay = `${i * 0.12}s`;
+    });
+  });
+
+  const reveal = (el) => {
+    // will-change recién se agrega acá (justo antes de animar) y se saca al
+    // terminar la transición: así el navegador sólo promueve a capa GPU los
+    // elementos que están animando en ese momento, no todos los [data-reveal]
+    // de la página desde que carga.
+    el.style.willChange = 'opacity, transform';
+    el.classList.add('is-revealed');
+    const clearWillChange = () => { el.style.willChange = ''; };
+    el.addEventListener('transitionend', clearWillChange, { once: true });
+    // Respaldo: si el elemento ya estaba fuera de layout/con la transición
+    // cortada por un salto grande de scroll, "transitionend" puede no llegar
+    // a disparar nunca. 1s cubre de sobra la transición de 0.9s declarada.
+    window.setTimeout(clearWillChange, 1000);
+  };
+
+  const observer = new IntersectionObserver(
+    (entries, obs) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+
+        if (entry.target.hasAttribute('data-reveal-group')) {
+          entry.target.querySelectorAll('[data-reveal]').forEach(reveal);
+        } else {
+          reveal(entry.target);
+        }
+
+        obs.unobserve(entry.target);
+      });
+    },
+    { rootMargin: '0px 0px -10% 0px', threshold: 0.01 },
+  );
+
+  singles.forEach((el) => observer.observe(el));
+  groups.forEach((group) => observer.observe(group));
+
+  // Salvaguarda: si por lo que sea el observer no disparó a tiempo (layout
+  // inestable, navegador lento), se revela igual pasado un margen. Preferimos
+  // perder la animación a que quede contenido invisible.
+  window.setTimeout(() => {
+    document.querySelectorAll('[data-reveal]:not(.is-revealed)').forEach(reveal);
+  }, 2500);
+}
+
+/**
+ * Parallax en elementos marcados con data-parallax="0.2" (intensidad; negativo
+ * invierte la dirección). Usado por el showcase de portfolio (4 columnas a
+ * distinta velocidad, igual que tiendanube.com) y queda disponible para
+ * cualquier otro elemento. Se desactiva con movimiento reducido. Si Lenis
+ * está activo se engancha a su evento de scroll; si no, usa el scroll nativo.
+ * @param {object|null} lenis
+ */
+function initParallax(lenis) {
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+  const elements = Array.from(document.querySelectorAll('[data-parallax]')).map((el) => ({
+    el,
+    intensity: parseFloat(el.dataset.parallax || '0.15'),
+  }));
+  if (!elements.length) return;
+
+  let ticking = false;
+
+  function update() {
+    ticking = false;
+    const viewportHeight = window.innerHeight;
+
+    elements.forEach(({ el, intensity }) => {
+      const rect = el.getBoundingClientRect();
+      // Progreso 0→1 de cuánto atravesó el elemento la pantalla, para que el
+      // desplazamiento sea proporcional a su posición y no salte al entrar.
+      const progress = (viewportHeight - rect.top) / (viewportHeight + rect.height);
+      const offset = (progress - 0.5) * intensity * rect.height;
+      el.style.transform = `translateY(${offset}px)`;
+    });
+  }
+
+  function onScroll() {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(update);
+  }
+
+  if (lenis) lenis.on('scroll', onScroll);
+  else window.addEventListener('scroll', onScroll, { passive: true });
+
+  window.addEventListener('resize', onScroll);
+  update();
+}
+
+/**
+ * Portfolio en tablet y mobile (≤900px): de 4 columnas a 2, con las cards
+ * repartidas en partes iguales. Las cards de la 3ª y la 4ª columna se pasan
+ * de a una a la 1ª y a la 2ª, y esas columnas se ocultan. Al ensanchar la
+ * pantalla cada card vuelve a su columna original.
+ * Agregar una card nueva en el HTML sigue bastando: no hace falta tocar este JS.
+ */
+function initPortfolioColumns() {
+  const cols = Array.from(document.querySelectorAll('.portfolio-col'));
+  if (cols.length < 3) return;
+
+  // Columna original de cada card, para poder deshacer el reparto.
+  const entries = cols.flatMap((col, colIndex) =>
+    Array.from(col.children).map((card) => ({ card, colIndex })),
+  );
+  const mobileQuery = window.matchMedia('(max-width: 900px)');
+
+  const layout = () => {
+    const isMobile = mobileQuery.matches;
+    let extra = 0;
+    entries.forEach(({ card, colIndex }) => {
+      let target = colIndex;
+      if (isMobile && colIndex >= 2) {
+        target = extra % 2;
+        extra += 1;
+      }
+      cols[target].appendChild(card);
+    });
+    cols.slice(2).forEach((col) => { col.hidden = isMobile; });
+  };
+
+  layout();
+  mobileQuery.addEventListener('change', layout);
+}
+
+/**
+ * Cards de portfolio con captura full-page larga (".portfolio-card--scroll"):
+ * en desktop el recorrido de arriba a abajo ya lo hace ":hover" en CSS. En
+ * touch no hay hover sostenido, así que acá se activa con el dedo apoyado
+ * (touchstart) y se corta al soltar o cancelar (touchend/touchcancel).
+ */
+function initPortfolioScrollCards() {
+  document.querySelectorAll('.portfolio-card--scroll').forEach((card) => {
+    if (card.dataset.touchBound) return;
+    card.dataset.touchBound = '1';
+    card.addEventListener('touchstart', () => card.classList.add('is-scrolling'), { passive: true });
+    card.addEventListener('touchend', () => card.classList.remove('is-scrolling'));
+    card.addEventListener('touchcancel', () => card.classList.remove('is-scrolling'));
+  });
+}
+
+function initMobileNav() {
+  const header = document.querySelector('.site-header');
+  const toggle = document.getElementById('nav-toggle');
+  const nav = document.getElementById('main-nav');
+  if (!header || !toggle || !nav) return;
+
+  toggle.addEventListener('click', () => {
+    const isOpen = header.classList.toggle('is-open');
+    toggle.setAttribute('aria-expanded', String(isOpen));
+    toggle.setAttribute('aria-label', isOpen ? 'Cerrar menú' : 'Abrir menú');
+    toggle.innerHTML = isOpen
+      ? '<i class="bi bi-x-lg" aria-hidden="true"></i>'
+      : '<i class="bi bi-list" aria-hidden="true"></i>';
+  });
+
+  const closeMenu = () => {
+    header.classList.remove('is-open');
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-label', 'Abrir menú');
+    toggle.innerHTML = '<i class="bi bi-list" aria-hidden="true"></i>';
+  };
+
+  nav.querySelectorAll('a').forEach((link) => link.addEventListener('click', closeMenu));
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && header.classList.contains('is-open')) {
+      closeMenu();
+      toggle.focus();
+    }
+  });
+}
+
+/**
+ * Banner de cookies (RGPD + LSSI-CE, criterio de la AEPD):
+ * - Antes de que la persona elija, no se carga nada que no sea estrictamente
+ *   necesario: Google Tag Manager se inyecta solo con el consentimiento de analítica.
+ * - "Aceptar" y "Rechazar" tienen el mismo peso visual y el interruptor de
+ *   analítica parte desactivado.
+ * - La elección se guarda en localStorage y caduca a los 24 meses.
+ * - Retirar el consentimiento recarga la página para que Tag Manager deje de ejecutarse.
+ * "Preferencias" despliega el panel con el interruptor; el link "Cookies" del
+ * footer reabre el banner para cambiar la elección.
+ */
+function initCookieBanner() {
+  const banner = document.getElementById('cookie-banner');
+  const panel = document.getElementById('cookie-settings-panel');
+  const analyticsToggle = document.getElementById('cookie-analytics-toggle');
+  if (!banner) return;
+
+  // ID del contenedor de Google Tag Manager de la web de España (formato 'GTM-XXXXXXX').
+  // Vacío = no se carga analítica aunque la persona acepte.
+  const GTM_ID = '';
+  const STORAGE_KEY = 'plexiweb-es-cookie-consent';
+  const MAX_AGE_MS = 730 * 24 * 60 * 60 * 1000; // 24 meses
+
+  let analyticsLoaded = false;
+
+  const hide = () => {
+    banner.classList.remove('is-visible');
+    banner.setAttribute('aria-hidden', 'true');
+  };
+
+  const show = () => {
+    banner.classList.add('is-visible');
+    banner.setAttribute('aria-hidden', 'false');
+  };
+
+  const readConsent = () => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+      if (!parsed || typeof parsed.analytics !== 'boolean' || typeof parsed.ts !== 'number') return null;
+      if (Date.now() - parsed.ts > MAX_AGE_MS) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  const writeConsent = (analytics) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ necessary: true, analytics, ts: Date.now() }));
+    } catch {
+      /* sin almacenamiento: se vuelve a preguntar en la próxima visita */
+    }
+  };
+
+  const loadAnalytics = () => {
+    if (analyticsLoaded || !GTM_ID) return;
+    analyticsLoaded = true;
+    window.dataLayer = window.dataLayer || [];
+    window.dataLayer.push({ 'gtm.start': Date.now(), event: 'gtm.js' });
+    const script = document.createElement('script');
+    script.async = true;
+    script.src = `https://www.googletagmanager.com/gtm.js?id=${encodeURIComponent(GTM_ID)}`;
+    document.head.appendChild(script);
+  };
+
+  // Borra las cookies de Google Analytics/Tag Manager que haya dejado un consentimiento anterior.
+  const clearAnalyticsCookies = () => {
+    const names = document.cookie
+      .split(';')
+      .map((c) => c.split('=')[0].trim())
+      .filter((name) => /^(_ga|_gid|_gat|_gcl)/.test(name));
+    const host = location.hostname;
+    const domains = [host, `.${host}`, `.${host.split('.').slice(-2).join('.')}`];
+    const expired = 'expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+    names.forEach((name) => {
+      document.cookie = `${name}=; ${expired}`;
+      domains.forEach((domain) => { document.cookie = `${name}=; ${expired}; domain=${domain}`; });
+    });
+  };
+
+  const saveConsent = (analytics) => {
+    const wasLoaded = analyticsLoaded;
+    writeConsent(analytics);
+    hide();
+    if (analytics) {
+      loadAnalytics();
+    } else if (wasLoaded) {
+      clearAnalyticsCookies();
+      location.reload();
+    }
+  };
+
+  const saved = readConsent();
+  if (saved) {
+    if (analyticsToggle) analyticsToggle.checked = saved.analytics;
+    if (saved.analytics) loadAnalytics();
+    else clearAnalyticsCookies();
+  } else {
+    setTimeout(show, 600);
+  }
+
+  document.getElementById('cookie-accept')?.addEventListener('click', () => saveConsent(true));
+  document.getElementById('cookie-reject')?.addEventListener('click', () => saveConsent(false));
+
+  document.getElementById('cookie-settings')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (panel) panel.hidden = !panel.hidden;
+  });
+
+  document.getElementById('cookie-save')?.addEventListener('click', () => {
+    saveConsent(!!analyticsToggle?.checked);
+  });
+
+  document.getElementById('footer-cookie-link')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (panel) panel.hidden = true;
+    show();
+  });
+}
